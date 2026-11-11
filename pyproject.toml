@@ -9,6 +9,10 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "httpx>=0.27",
     "python-dotenv>=1.0",
+    # batch file processing (maps-batch CLI + Streamlit UI)
+    "pandas>=2.2",
+    "openpyxl>=3.1",
+    "xlrd>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -16,19 +20,26 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+# Streamlit UI (uv sync --extra ui).
+ui = [
+    "streamlit>=1.40",
+]
 
 [project.scripts]
 composio-bridge = "composio_bridge:main"
+maps-batch = "batch_processor:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["composio_bridge.py"]
+only-include = ["composio_bridge.py", "batch_processor.py", "streamlit_app.py"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "composio_bridge.py" = "composio_bridge.py"
+"batch_processor.py" = "batch_processor.py"
+"streamlit_app.py" = "streamlit_app.py"
 
 [tool.uv]
 # Project is a single module, not a package: installing it as editable is fine.

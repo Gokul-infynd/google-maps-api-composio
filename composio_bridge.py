@@ -47,8 +47,9 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from contextlib import asynccontextmanager
-from typing import Any, Literal, Optional
+from typing import Any, AsyncIterator, Literal, Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -84,6 +85,18 @@ COMPOSIO_USER_ID: str = os.getenv("COMPOSIO_USER_ID", "default")
 REQUEST_TIMEOUT: float = float(os.getenv("COMPOSIO_TIMEOUT", "90"))
 MAX_BATCH_SIZE: int = int(os.getenv("MAX_BATCH_SIZE", "50"))
 MAX_BATCH_CONCURRENCY: int = int(os.getenv("MAX_BATCH_CONCURRENCY", "8"))
+# --- Per-key rate limit (sliding window + cooldown) -------------------------------
+# Each key gets its own budget of RATE_LIMIT_PER_KEY_PER_MINUTE calls per
+# RATE_LIMIT_WINDOW_SECONDS window (default 2000 / 60s = 2000 calls per minute).
+# A key that exhausts its budget goes into cooldown and is skipped by the
+# router until its oldest call leaves the window; the request then rides on a
+# different key. Only when EVERY key is cooling down (or in flight) does the
+# caller wait - bounded by RATE_LIMIT_MAX_WAIT_SECONDS, after which a 429 /
+# 503 is returned instead of waiting forever.
+# Set RATE_LIMIT_PER_KEY_PER_MINUTE=0 to disable rate limiting.
+RATE_LIMIT_PER_KEY_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_KEY_PER_MINUTE", "2000"))
+RATE_LIMIT_WINDOW_SECONDS: float = float(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+RATE_LIMIT_MAX_WAIT_SECONDS: float = float(os.getenv("RATE_LIMIT_MAX_WAIT_SECONDS", "65"))
 # Optional: set a bearer token to protect this bridge when exposed publicly.
 BRIDGE_API_TOKEN: str = (os.getenv("BRIDGE_API_TOKEN") or "").strip()
 # Optional: friendly aliases, e.g. COMPOSIO_ALIASES="maps=COMPOSIO_SEARCH_GOOGLE_MAPS_SEARCH"
@@ -114,18 +127,41 @@ def mask_key(key: str) -> str:
     return f"{key[:8]}...{key[-4:]}"
 
 
+class PoolExhausted(Exception):
+    """Internal: no key is usable right now - every key is busy or cooling down.
+
+    `wait` is how long the caller should sleep before retrying (seconds),
+    `reason` is "cooldown" (all keys hit their per-minute rate limit) or
+    "busy" (all keys are mid-request).
+    """
+
+    def __init__(self, wait: float, reason: str) -> None:
+        super().__init__(reason)
+        self.wait = max(0.001, wait)
+        self.reason = reason
+
+
 class KeyPool:
     """
-    Round-robin rotation over N API keys.
+    Round-robin rotation over N API keys, with a per-key rate limiter.
 
     Request 1 -> keys[0], request 2 -> keys[1], ..., request N+1 -> keys[0] ...
 
     "Busy" keys (currently mid-request) are skipped so concurrent bulk calls
     spread evenly instead of all landing on the same key. If every key is busy
     it falls back to the pure round-robin pick rather than waiting.
+
+    Rate limiting: every key gets RATE_LIMIT_PER_KEY_PER_MINUTE calls per
+    sliding RATE_LIMIT_WINDOW_SECONDS window (default 2000 calls/minute per
+    key). A key that exhausts its budget goes into cooldown - it is skipped by
+    _acquire() until its oldest call slides out of the window - so traffic
+    simply moves to the remaining keys. When *all* keys are cooling down the
+    caller waits (asyncio.sleep, so the event loop stays free) up to
+    RATE_LIMIT_MAX_WAIT_SECONDS before giving up with 429/503.
     """
 
-    def __init__(self, keys: list[str]) -> None:
+    def __init__(self, keys: list[str], *, rate_limit: Optional[int] = None,
+                 window_seconds: Optional[float] = None) -> None:
         self._keys = list(keys)
         self._cursor = 0
         self._busy: dict[int, int] = {i: 0 for i in range(len(keys))}
@@ -135,6 +171,10 @@ class KeyPool:
             for i in range(len(keys))
         }
         self._last_used: dict[int, float] = {}
+        # Per-key sliding window of call timestamps (monotonic seconds).
+        self.rate_limit: int = RATE_LIMIT_PER_KEY_PER_MINUTE if rate_limit is None else rate_limit
+        self.window_seconds: float = RATE_LIMIT_WINDOW_SECONDS if window_seconds is None else window_seconds
+        self._windows: dict[int, deque[float]] = {i: deque() for i in range(len(keys))}
 
     # -- introspection ------------------------------------------------------
     def __len__(self) -> int:
@@ -148,7 +188,7 @@ class KeyPool:
         return list(self._keys)
 
     def reload(self, keys: list[str]) -> int:
-        """Swap the key list at runtime (e.g. after editing .env). Resets rotation/stats."""
+        """Swap the key list at runtime (e.g. after editing .env). Resets rotation/stats/windows."""
         with self._lock:
             self._keys = list(keys)
             self._cursor = 0
@@ -156,17 +196,25 @@ class KeyPool:
             self._stats = {i: {"requests": 0, "successes": 0, "failures": 0,
                                "rate_limited": 0, "auth_failures": 0} for i in range(len(self._keys))}
             self._last_used = {}
+            self._windows = {i: deque() for i in range(len(self._keys))}
         return len(self._keys)
 
     def snapshot(self, reveal: bool = False) -> list[dict[str, Any]]:
         with self._lock:
+            now = time.monotonic()
             out = []
             for i, key in enumerate(self._keys):
+                self._prune_locked(i, now)
                 out.append({
                     "index": i + 1,
                     "key": key if reveal else mask_key(key),
                     "in_flight": self._busy[i],
                     "last_used_epoch": self._last_used.get(i),
+                    # per-key rate limit / cooldown state
+                    "window_used": len(self._windows[i]),
+                    "window_limit": self.rate_limit if self.rate_limit > 0 else None,
+                    "window_seconds": self.window_seconds,
+                    "cooldown_seconds": round(self._cooldown_locked(i, now), 2),
                     **self._stats[i],
                 })
             return out
@@ -176,24 +224,62 @@ class KeyPool:
         with self._lock:
             return sum(s["requests"] for s in self._stats.values())
 
+    # -- per-key rate limit (sliding window) -------------------------------
+    def _prune_locked(self, idx: int, now: float) -> None:
+        """Drop timestamps that have left the window (callers must hold the lock)."""
+        window = self._windows.get(idx)
+        if not window:
+            return
+        cutoff = now - self.window_seconds
+        while window and window[0] <= cutoff:
+            window.popleft()
+
+    def _cooldown_locked(self, idx: int, now: float) -> float:
+        """Seconds until this key has a free slot again (0 = ready now)."""
+        if self.rate_limit <= 0:
+            return 0.0
+        window = self._windows[idx]
+        if len(window) < self.rate_limit:
+            return 0.0
+        return max(0.0, window[0] + self.window_seconds - now)
+
     # -- rotation -----------------------------------------------------------
     def _acquire(self) -> int:
-        """Pick the next key index (round-robin, skipping busy keys) and mark it busy."""
+        """Pick the next key (round-robin, skipping busy AND cooling-down keys).
+
+        Marks the key busy and records the call in its rate-limit window.
+        Raises PoolExhausted when every key is busy or cooling down.
+        """
         with self._lock:
             n = len(self._keys)
             if n == 0:
                 raise RuntimeError("No API keys configured")
+            now = time.monotonic()
+            for i in range(n):
+                self._prune_locked(i, now)
             start = self._cursor % n
-            chosen = start
+            chosen: Optional[int] = None
+            cooldown_wait: Optional[float] = None
             for step in range(n):
                 idx = (start + step) % n
+                wait = self._cooldown_locked(idx, now)
+                if wait > 0:
+                    cooldown_wait = wait if cooldown_wait is None else min(cooldown_wait, wait)
+                    continue  # key is cooling down - try the next one
                 if self._busy[idx] == 0:
                     chosen = idx
                     break
+            if chosen is None:
+                # Nothing free: report how long until the first slot frees up.
+                if cooldown_wait is not None:
+                    raise PoolExhausted(cooldown_wait, "cooldown")
+                raise PoolExhausted(0.05, "busy")
             self._cursor = (chosen + 1) % n  # next request starts searching from the following key
             self._busy[chosen] += 1
             self._stats[chosen]["requests"] += 1
             self._last_used[chosen] = time.time()
+            if self.rate_limit > 0:
+                self._windows[chosen].append(now)
             return chosen
 
     def _release(self, idx: int) -> None:
@@ -208,9 +294,37 @@ class KeyPool:
                 self._stats[idx][bucket] += 1
 
     @asynccontextmanager
-    async def use(self):
-        """Yield (index, key) for one upstream call, then release the busy slot."""
-        idx = self._acquire()
+    async def use(self, max_wait: Optional[float] = None) -> AsyncIterator[tuple[int, str]]:
+        """Yield (index, key) for one upstream call, then release the busy slot.
+
+        If every key is in flight or cooling down after hitting its per-key
+        rate limit, waits (without blocking the event loop) until a slot frees
+        up - at most `max_wait` seconds (default RATE_LIMIT_MAX_WAIT_SECONDS).
+        Raises HTTPException 429 when all keys are rate limited, 503 when the
+        pool stays fully in flight.
+        """
+        if max_wait is None:
+            max_wait = RATE_LIMIT_MAX_WAIT_SECONDS
+        deadline = time.monotonic() + max(0.0, max_wait)
+        while True:
+            try:
+                idx = self._acquire()
+                break
+            except PoolExhausted as exc:
+                remaining = deadline - time.monotonic()
+                if exc.wait > remaining:
+                    if exc.reason == "cooldown":
+                        raise HTTPException(429, detail=error_body(
+                            429, "KEY_POOL_COOLING_DOWN",
+                            f"All {len(self._keys)} key(s) hit their {self.rate_limit} calls / "
+                            f"{self.window_seconds:g}s rate limit and are cooling down; "
+                            f"gave up after {max_wait:g}s.",
+                            retry_after_seconds=round(exc.wait, 2))) from None
+                    raise HTTPException(503, detail=error_body(
+                        503, "KEY_POOL_BUSY",
+                        f"All {len(self._keys)} key(s) are in flight; gave up after {max_wait:g}s.",
+                        retry_after_seconds=round(exc.wait, 2))) from None
+                await asyncio.sleep(min(exc.wait, remaining))
         try:
             yield idx, self._keys[idx]
         finally:
@@ -413,6 +527,10 @@ class MapsSearchRequest(BaseModel):
         }
     )
 
+    id: Optional[str] = Field(
+        None, max_length=64,
+        description="Client correlation id (e.g. spreadsheet row). Echoed back on bulk results, never sent upstream.",
+    )
     q: str = Field(..., min_length=1, max_length=500, description="The query you want to search.", examples=["pizza", "hotels"])
     ll: Optional[str] = Field(
         None,
@@ -432,8 +550,8 @@ class MapsSearchRequest(BaseModel):
         return v
 
     def to_arguments(self) -> dict[str, Any]:
-        # Only forward fields that were actually supplied.
-        return self.model_dump(mode="json", exclude_none=True, exclude={"user_id"})
+        # Only forward fields that were actually supplied (id/user_id are bridge-side metadata).
+        return self.model_dump(mode="json", exclude_none=True, exclude={"user_id", "id"})
 
 
 class BulkMapsSearchRequest(BaseModel):
@@ -614,6 +732,9 @@ async def health(reveal_keys: bool = Query(False, description="Show full keys in
         "next_key_index": (KEY_POOL._cursor % KEY_POOL.size) + 1 if KEY_POOL.size else None,
         "total_requests_routed": KEY_POOL.total_requests,
         "retry_on_key_failure": RETRY_ON_KEY_FAILURE,
+        "rate_limit_per_key_per_minute": KEY_POOL.rate_limit if KEY_POOL.rate_limit > 0 else None,
+        "rate_limit_window_seconds": KEY_POOL.window_seconds,
+        "rate_limit_max_wait_seconds": RATE_LIMIT_MAX_WAIT_SECONDS,
         "keys": KEY_POOL.snapshot(reveal=reveal_keys),
         # ---- config ----
         "composio_base_url": COMPOSIO_BASE_URL,

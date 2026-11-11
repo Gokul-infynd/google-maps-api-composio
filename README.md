@@ -29,6 +29,10 @@ cp .env.example .env          # set COMPOSIO_API_KEY=key1,key2,...
 | `./bridge.sh health` | pretty-print `/health` |
 | `./bridge.sh test` | run the offline pytest suite |
 | `./bridge.sh local` | run in the foreground (debugging, no PM2) |
+| `./bridge.sh ui` | start the Streamlit UI under PM2 (`uv sync --extra ui` first) |
+| `./bridge.sh ui-stop` / `ui-logs` | stop / tail the Streamlit UI |
+| `./bridge.sh ui-local` | run the Streamlit UI in the foreground |
+| `./bridge.sh batch file.xlsx …` | run the batch script directly (see *Batch file processing*) |
 
 Logs go to `logs/out.log` and `logs/error.log`.
 
@@ -69,6 +73,29 @@ whose `keys_tried` lists the attempted key numbers.
 
 Set `COMPOSIO_RETRY_ON_KEY_FAILURE=false` to get strict rotation with no failover.
 
+### Per-key rate limit (2000 calls/min) with key cooldown
+
+Every key gets its **own sliding-window budget**: `RATE_LIMIT_PER_KEY_PER_MINUTE`
+calls per `RATE_LIMIT_WINDOW_SECONDS` (default **2000 calls/minute per key**).
+
+- A key that exhausts its budget goes into **cooldown** and is *skipped* by the
+  router until its oldest call leaves the window - traffic moves to the other keys.
+- Only when **every** key is cooling down (or in flight) does the request wait -
+  asynchronously, bounded by `RATE_LIMIT_MAX_WAIT_SECONDS` (default 65s) - and
+  then fail with `429 KEY_POOL_COOLING_DOWN` (all keys rate limited) or
+  `503 KEY_POOL_BUSY` (all keys in flight) instead of hanging.
+- Upstream 429s from Composio still fail over to the next key as before.
+
+```env
+RATE_LIMIT_PER_KEY_PER_MINUTE=2000   # 0 = unlimited
+RATE_LIMIT_WINDOW_SECONDS=60
+RATE_LIMIT_MAX_WAIT_SECONDS=65
+```
+
+`GET /health` reports `rate_limit_per_key_per_minute`, `rate_limit_window_seconds`
+and - per key - `window_used`, `window_limit` and `cooldown_seconds` (time until
+the key has a free slot again).
+
 
 Swagger UI: http://127.0.0.1:8000/docs
 
@@ -104,6 +131,96 @@ curl -X POST 'http://127.0.0.1:8000/v1/maps/search/bulk?shape=slim' \
     {"q":"coffee","ll":"@12.9716,77.5946,13z"},
     {"q":"sushi","ll":"@51.5074,-0.1278,13z"}
   ]}'
+```
+
+Each bulk item may carry an **`id`** (e.g. the spreadsheet row) - it is echoed
+back on the matching result slot, which is how the batch script correlates
+results to rows.
+
+## Batch file processing (`maps-batch`)
+
+`batch_processor.py` reads an Excel/CSV file, runs every row through
+`POST /v1/maps/search/bulk` and writes the results back into the **same row**
+(new `maps_*` columns - input columns are never touched).
+
+```bash
+./bridge.sh batch input.xlsx                          # = uv run maps-batch input.xlsx
+uv run maps-batch input.xlsx -o out.xlsx
+uv run maps-batch input.xlsx --start-row 11 --end-row 60   # only rows 11..60 (1-based, inclusive)
+uv run maps-batch input.xlsx --query-column "Search Term" --lat-column Latitude --lng-column Longitude
+uv run maps-batch input.xlsx --query-column City,Item --shape full   # append columns into one query
+```
+
+- **Auto-detected input columns** (override with flags): `q`/`query`/`search term`, `ll`
+  or `lat`+`lng`(+`zoom`), `start`, `user_id`. Rows with an empty query or an invalid
+  location are marked per-row (`maps_status=invalid_input`) and never break the batch.
+- **Multi-column query**: pass `--query-column` more than once or comma-separate
+  (`--query-column City,Item`) - the cell values of the selected columns are appended
+  with `QUERY_JOINER` (default a space) into one query, e.g. `City=Paris` +
+  `Item=coffee` → `Paris coffee`. Empty cells are skipped.
+- **Row range**: `--start-row` / `--end-row` (1-based, inclusive; row 1 = first row
+  under the header). Rows outside the range are left untouched (`maps_status=not_processed`).
+- **Response mode**: `--shape full` (default, or `PROCESSOR_SHAPE=full`) writes back
+  **every field the endpoint returns** as its own `maps_<field>` column; `--shape slim`
+  requests the compact place payload instead.
+- Retries 429/5xx/transport errors with exponential backoff (`PROCESSOR_*` env vars).
+
+Output columns written per row:
+
+| Column | Meaning |
+|---|---|
+| `maps_status` | `ok` · `no_results` · `failed` · `invalid_input` · `not_processed` |
+| `maps_count` | number of places found |
+| `maps_title`, `maps_address`, `maps_type`, `maps_types` | top result |
+| `maps_rating`, `maps_reviews`, `maps_price` | rating / review count / price level |
+| `maps_phone`, `maps_website`, `maps_hours`, `maps_open_state` | contact + hours |
+| `maps_place_id`, `maps_data_id`, `maps_latitude`, `maps_longitude` | identifiers + GPS |
+| `maps_thumbnail`, `maps_position`, `maps_description` | extras |
+| `maps_all_places_json` | **all** results of the row as JSON |
+| `maps_latency_ms`, `maps_log_id` | per-item telemetry |
+| `maps_error` | error message when the search failed |
+| `maps_<field>` (dynamic) | **every other field** the endpoint returned for the top result (`maps_country`, `maps_operating_hours`, `maps_provider_id`, `maps_order_online`, `maps_reviews_link`, …) - added as columns on demand |
+| `maps_search_information_json` | search metadata (`shape=full`) |
+
+Cell values are clipped to Excel's 32 767-char limit; `maps_all_places_json`
+automatically falls back to slimmed places when the full payload would not fit.
+
+Other sheets in the workbook are copied through unchanged. Exit codes: `0` all rows
+ok, `1` some rows failed, `2` fatal (bridge down, bad file, …).
+
+## Streamlit UI
+
+```bash
+./bridge.sh ui            # PM2 (uv sync --extra ui first)  -> http://127.0.0.1:8501
+./bridge.sh ui-local      # foreground
+```
+
+Flow: **upload file → sheet + column mapping (auto-detected, overridable) → pick the
+row range + response mode → Start**. The UI then shows a live progress bar, per-row
+preview table and counters (with a **Stop** button), and finally offers the processed
+file as a download.
+
+- **Query column(s) = checkboxes**: every column of the sheet is listed with a checkbox -
+  tick as many as you like; their cell values are appended (`QUERY_JOINER`, default a
+  space) into a single query per row (e.g. *City* + *Item* → `Paris coffee`).
+  All other fields (location, lat/lng, …) use single-column selects.
+- **Response mode radio**: `full` (default - every endpoint field becomes a `maps_*`
+  column) or `slim` (compact payload, smaller file).
+- The file is uploaded to a **server temp dir** (`TEMP_DIR`, default
+  `<system tmp>/composio_bridge/jobs/…`) and erased after `TEMP_FILE_TTL_MINUTES`
+  (default 60) by a background sweeper that runs every `TEMP_CLEANUP_INTERVAL_SECONDS`.
+- The sidebar shows live bridge status (keys, rate limit, max batch size).
+- Bridge URL is configurable in the sidebar (`BRIDGE_URL` in `.env` by default).
+
+```env
+BRIDGE_URL=http://127.0.0.1:8000
+PROCESSOR_SHAPE=full           # full = all endpoint fields as columns | slim
+QUERY_JOINER=                  # separator for multi-column queries (default " ")
+TEMP_DIR=                      # empty = <system tmp>/composio_bridge
+TEMP_FILE_TTL_MINUTES=60
+TEMP_CLEANUP_INTERVAL_SECONDS=300
+UI_HOST=0.0.0.0
+UI_PORT=8501
 ```
 
 ## Responses & errors
