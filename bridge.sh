@@ -13,15 +13,15 @@
 #   ./bridge.sh health     curl /health
 #   ./bridge.sh test       run the pytest suite
 #   ./bridge.sh local      foreground run (not via PM2), for debugging
-#   ./bridge.sh ui         start the Streamlit UI (uv sync --extra ui + PM2)
-#   ./bridge.sh ui-stop    stop the Streamlit UI
-#   ./bridge.sh ui-logs    tail the UI logs
 #   ./bridge.sh batch      run the batch script: ./bridge.sh batch file.xlsx [args...]
+#
+# The batch UI is served by the bridge itself (same port as /docs):
+#   http://127.0.0.1:8000/login   login page (username/password -> JWT)
+#   http://127.0.0.1:8000/home     the batch app (per-user run history)
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 APP_NAME="composio-rest-bridge"
-UI_APP_NAME="composio-maps-ui"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
@@ -29,8 +29,6 @@ VENV_PY="$ROOT/.venv/bin/python"
 ENV_FILE="$ROOT/.env"
 PORT="${PORT:-$(grep -E '^PORT=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d ' "' || true)}"
 PORT="${PORT:-8000}"
-UI_PORT="${UI_PORT:-$(grep -E '^UI_PORT=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d ' "' || true)}"
-UI_PORT="${UI_PORT:-8501}"
 
 c_green='\033[0;32m'; c_red='\033[0;31m'; c_yel='\033[0;33m'; c_off='\033[0m'
 info() { printf "${c_green}==>${c_off} %s\n" "$*"; }
@@ -49,27 +47,16 @@ need_env() {
   fi
 }
 
-# Ensure the uv-managed venv exists.
-# NOTE: always pass --extra ui - a plain `uv sync` prunes every package not
-# selected by that sync, which UNINSTALLS streamlit (21 packages) and deletes
-# its static files out from under a running UI -> HTTP 500 on the UI port.
+# Ensure the uv-managed venv exists (all UI deps are plain core deps now).
 ensure_venv() {
   command -v uv >/dev/null 2>&1 || die "uv not found. Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
   if [ ! -x "$VENV_PY" ]; then
-    info "No .venv found - running 'uv sync --extra ui'..."
-    uv sync --extra ui
+    info "No .venv found - running 'uv sync'..."
+    uv sync
   else
-    info "Checking environment (uv sync --extra ui...)"
-    uv sync --extra ui --quiet
+    info "Checking environment (uv sync...)"
+    uv sync --quiet
   fi
-  [ -x "$VENV_PY" ] || die "uv sync did not create .venv/bin/python"
-}
-
-# Ensure the venv exists INCLUDING the Streamlit UI extra.
-ensure_venv_ui() {
-  command -v uv >/dev/null 2>&1 || die "uv not found. Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
-  info "Syncing environment with the 'ui' extra (streamlit)..."
-  uv sync --extra ui --quiet
   [ -x "$VENV_PY" ] || die "uv sync did not create .venv/bin/python"
 }
 
@@ -82,24 +69,12 @@ wait_healthy() {
   command -v curl >/dev/null 2>&1 || return 0
   for _ in $(seq 1 30); do
     if curl -fsS -m 2 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
-      info "Healthy on http://127.0.0.1:${PORT} (docs: http://127.0.0.1:${PORT}/docs)"
+      info "Healthy on http://127.0.0.1:${PORT} (docs: /docs | UI: /home | login: /login)"
       return 0
     fi
     sleep 1
   done
   warn "Not responding on port ${PORT} yet - check: ./bridge.sh logs"
-}
-
-wait_ui() {
-  command -v curl >/dev/null 2>&1 || return 0
-  for _ in $(seq 1 30); do
-    if curl -fsS -m 2 -o /dev/null "http://127.0.0.1:${UI_PORT}/" 2>/dev/null; then
-      info "UI up on http://127.0.0.1:${UI_PORT}"
-      return 0
-    fi
-    sleep 1
-  done
-  warn "UI not responding on port ${UI_PORT} yet - check: ./bridge.sh ui-logs"
 }
 
 case "${1:-}" in
@@ -131,16 +106,12 @@ case "${1:-}" in
   stop)
     need_pm2
     pm2 stop "$APP_NAME" && info "Stopped"
-    pm2 stop "$UI_APP_NAME" >/dev/null 2>&1 && info "Stopped $UI_APP_NAME" || true
     ;;
 
   restart)
     need_pm2; need_env
     ensure_venv
     pm2 restart "$APP_NAME" --update-env && info "Restarted"
-    if pm2 describe "$UI_APP_NAME" >/dev/null 2>&1; then
-      pm2 restart "$UI_APP_NAME" --update-env && info "Restarted $UI_APP_NAME"
-    fi
     wait_healthy
     ;;
 
@@ -174,29 +145,6 @@ case "${1:-}" in
     uv run --extra dev pytest
     ;;
 
-  ui)
-    need_pm2; ensure_venv_ui
-    mkdir -p logs
-    if pm2 describe "$UI_APP_NAME" >/dev/null 2>&1; then
-      info "Restarting $UI_APP_NAME (--update-env)"
-      pm2 restart "$UI_APP_NAME" --update-env
-    else
-      pm2 start ecosystem.config.js --only "$UI_APP_NAME"
-    fi
-    info "UI port: ${UI_PORT} (UI_PORT in .env)"
-    wait_ui
-    ;;
-
-  ui-stop)
-    need_pm2
-    pm2 stop "$UI_APP_NAME" && info "Stopped $UI_APP_NAME"
-    ;;
-
-  ui-logs)
-    need_pm2
-    pm2 logs "$UI_APP_NAME" --lines 100
-    ;;
-
   batch)
     ensure_venv
     [ $# -ge 2 ] || die "usage: ./bridge.sh batch <input.xlsx> [maps-batch args...]"
@@ -206,19 +154,12 @@ case "${1:-}" in
 
   local)
     need_env; ensure_venv
-    info "Foreground mode (Ctrl+C to quit)"
+    info "Foreground mode (Ctrl+C to quit) - UI: http://127.0.0.1:${PORT}/home"
     exec "$VENV_PY" -m composio_bridge
     ;;
 
-  ui-local)
-    ensure_venv_ui
-    info "Streamlit foreground mode on http://127.0.0.1:${UI_PORT} (Ctrl+C to quit)"
-    exec "$VENV_PY" -m streamlit run streamlit_app.py \
-      --server.port "$UI_PORT" --server.headless true --browser.gatherUsageStats false
-    ;;
-
   *)
-    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

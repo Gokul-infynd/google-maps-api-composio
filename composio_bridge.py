@@ -33,6 +33,11 @@ Run
 Docs: http://127.0.0.1:8000/docs   (Swagger UI)
       http://127.0.0.1:8000/redoc  (ReDoc)
 
+Batch UI (HTML + JWT login + per-user run history in SQLite):
+      http://127.0.0.1:8000/login  (username/password -> JWT)
+      http://127.0.0.1:8000/home    (the app page)
+      Runs execute in background threads - closing the browser does not stop them.
+
 Quick test
 ----------
     curl -X POST http://127.0.0.1:8000/v1/maps/search \
@@ -57,6 +62,8 @@ from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError as ValidationErrorPlaceholder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+import ui_api
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -345,25 +352,32 @@ async def lifespan(app: FastAPI):
         limits=httpx.Limits(max_connections=64, max_keepalive_connections=32),
         headers={"Content-Type": "application/json"},
     )
+    ui_api.startup()  # sqlite (users/history), temp sweeper, seeded login
     log.info("Composio bridge ready -> %s | %d API key(s) loaded: %s", COMPOSIO_BASE_URL,
              KEY_POOL.size, ", ".join(mask_key(k) for k in API_KEYS) or "NONE")
+    log.info("Batch UI ready -> /home  (login page: /login)")
     try:
         yield
     finally:
+        ui_api.shutdown()
         await _client.aclose()
         _client = None
 
 
 app = FastAPI(
     title="Composio REST Bridge",
-    version="1.1.0",
+    version="1.2.0",
     description=(
         "Plain REST wrapper around Composio tools. "
         "Focus: **COMPOSIO_SEARCH_GOOGLE_MAPS_SEARCH** (Composio Search -> Google Maps Search). "
-        "Batch (Bulk) endpoints accept up to " + str(MAX_BATCH_SIZE) + " items per call."
+        "Batch (Bulk) endpoints accept up to " + str(MAX_BATCH_SIZE) + " items per call. "
+        "Batch UI: **/home** (login: **/login**)."
     ),
     lifespan=lifespan,
 )
+
+# HTML UI (login page, batch app, per-user history) - see ui_api.py.
+app.include_router(ui_api.router)
 
 # --------------------------------------------------------------------------
 # Error model

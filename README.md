@@ -29,10 +29,10 @@ cp .env.example .env          # set COMPOSIO_API_KEY=key1,key2,...
 | `./bridge.sh health` | pretty-print `/health` |
 | `./bridge.sh test` | run the offline pytest suite |
 | `./bridge.sh local` | run in the foreground (debugging, no PM2) |
-| `./bridge.sh ui` | start the Streamlit UI under PM2 (`uv sync --extra ui` first) |
-| `./bridge.sh ui-stop` / `ui-logs` | stop / tail the Streamlit UI |
-| `./bridge.sh ui-local` | run the Streamlit UI in the foreground |
 | `./bridge.sh batch file.xlsx …` | run the batch script directly (see *Batch file processing*) |
+
+The batch UI is served **by the bridge itself** on the same port as `/docs`
+(no second process): `http://127.0.0.1:8000/login` and `http://127.0.0.1:8000/home`.
 
 Logs go to `logs/out.log` and `logs/error.log`.
 
@@ -188,12 +188,43 @@ automatically falls back to slimmed places when the full payload would not fit.
 Other sheets in the workbook are copied through unchanged. Exit codes: `0` all rows
 ok, `1` some rows failed, `2` fatal (bridge down, bad file, …).
 
-## Streamlit UI
+## Web UI (`/login` + `/home`)
+
+The UI is plain **HTML + CSS + JS served by the FastAPI bridge itself** - same
+process, same port as `/docs`:
 
 ```bash
-./bridge.sh ui            # PM2 (uv sync --extra ui first)  -> http://127.0.0.1:8501
-./bridge.sh ui-local      # foreground
+./bridge.sh restart                      # the bridge serves the UI
+# open http://127.0.0.1:8000/login        # username/password -> JWT
+#      http://127.0.0.1:8000/home          # the batch app (redirects to /login)
 ```
+
+**Authentication (JWT)**
+
+- First start creates a bootstrap admin: `UI_USERNAME` (default `admin`) +
+  `UI_PASSWORD`. If `UI_PASSWORD` is empty, a random one is generated and
+  printed **once** in the logs.
+- Extra users: `UI_USERS=user1:pass1,user2:pass2`. Passwords are stored as
+  PBKDF2-SHA256 hashes in the sqlite DB; login returns an HS256 JWT
+  (`UI_JWT_SECRET`, generated+persisted when unset;
+  `UI_JWT_EXPIRE_MINUTES`, default 720).
+- More than 5 failed logins per username within 5 minutes -> HTTP 429.
+
+**Per-user run history (sqlite)**
+
+- Every started run is persisted in `UI_DB_PATH` (default `./data/ui.db`):
+  file, sheet, mode, row range, status (`queued/running/done/stopped/error`),
+  row counters, timestamps and the processing summary.
+- The **History** view lists only *your* runs; other users' jobs return 404.
+
+**Runs survive a closed page**
+
+- Processing executes in a **server-side background thread** - closing the
+  browser tab does not stop it. Reopen `/home` (auto-re-attach) or pick the run
+  from **History** to watch live progress, stop it, or download the result.
+- If the *server* restarts mid-run, the job is marked `error`
+  ("Processing was interrupted by a server restart") so history never shows a
+  phantom running state.
 
 Flow: **upload file → sheet + column mapping (auto-detected, overridable) → pick the
 row range + response mode → Start**. The UI then shows a live progress bar, per-row
@@ -208,7 +239,8 @@ file as a download.
   column) or `slim` (compact payload, smaller file).
 - The file is uploaded to a **server temp dir** (`TEMP_DIR`, default
   `<system tmp>/composio_bridge/jobs/…`) and erased after `TEMP_FILE_TTL_MINUTES`
-  (default 60) by a background sweeper that runs every `TEMP_CLEANUP_INTERVAL_SECONDS`.
+  (default 60) by a background sweeper that runs every `TEMP_CLEANUP_INTERVAL_SECONDS`
+  (history rows outlive their files).
 - The sidebar shows live bridge status (keys, rate limit, max batch size).
 - Bridge URL is configurable in the sidebar (`BRIDGE_URL` in `.env` by default).
 
@@ -219,8 +251,13 @@ QUERY_JOINER=                  # separator for multi-column queries (default " "
 TEMP_DIR=                      # empty = <system tmp>/composio_bridge
 TEMP_FILE_TTL_MINUTES=60
 TEMP_CLEANUP_INTERVAL_SECONDS=300
-UI_HOST=0.0.0.0
-UI_PORT=8501
+UI_USERNAME=admin
+UI_PASSWORD=                   # empty = random, logged once on first start
+UI_USERS=                      # extra logins: user1:pass1,user2:pass2
+UI_JWT_SECRET=                 # empty = generated + stored in the DB
+UI_JWT_EXPIRE_MINUTES=720
+UI_DB_PATH=./data/ui.db
+UI_MAX_UPLOAD_MB=200
 ```
 
 ## Responses & errors

@@ -19,8 +19,8 @@ Standalone CLI
     uv run maps-batch input.xlsx -o output.xlsx
     uv run maps-batch input.xlsx --start-row 11 --end-row 60 --query-column q
 
-As a library (Streamlit UI)
----------------------------
+As a library (built-in /home page)
+--------------------------------
     from batch_processor import process_file, ProgressReporter
 
     reporter = ProgressReporter(total=100)

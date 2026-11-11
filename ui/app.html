@@ -1,0 +1,976 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Google Maps Batch Search</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2129; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #4c8dff; --accent-hi: #6ca0ff;
+    --danger: #f85149; --ok: #3fb950; --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14.5px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 20px; background: var(--panel);
+    border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5;
+  }
+  header .title { font-size: 17px; font-weight: 650; }
+  header .spacer { flex: 1; }
+  header .user { color: var(--muted); font-size: 13px; }
+  .layout { display: flex; min-height: calc(100vh - 53px); }
+  .sidebar {
+    width: 265px; flex-shrink: 0; padding: 16px;
+    background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  main { flex: 1; padding: 22px 26px; min-width: 0; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase;
+             letter-spacing: .06em; color: var(--muted); }
+  .navbtn {
+    display: block; width: 100%; text-align: left; margin-bottom: 8px;
+    padding: 9px 12px; font-size: 14px; cursor: pointer;
+    background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+  }
+  .navbtn.active { border-color: var(--accent); background: rgba(76,141,255,.14); }
+  .navbtn:hover { border-color: var(--accent); }
+  h2 { font-size: 18px; margin: 4px 0 14px; }
+  h2 .step { color: var(--muted); font-weight: 400; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .ok-line { color: var(--ok); font-size: 13px; }
+  .bad-line { color: var(--danger); font-size: 13px; }
+  .drop {
+    border: 2px dashed var(--border); border-radius: 10px;
+    padding: 38px 20px; text-align: center; cursor: pointer;
+    background: var(--panel); transition: border-color .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); }
+  .drop .big { font-size: 34px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  @media (max-width: 1100px) {
+    .grid2, .grid3, .grid4 { grid-template-columns: 1fr; }
+    /* keep the sidebar (nav + history) visible - stack it above the content */
+    .layout { flex-direction: column; }
+    .sidebar { width: 100% !important; border-right: 0; border-bottom: 1px solid var(--border); }
+    .side-hist { max-height: 210px; }
+    .resizer { display: none; }   /* stacked layout: nothing to drag */
+  }
+  label.f { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 4px; }
+  select, input[type="number"], input[type="text"] {
+    width: 100%; padding: 8px 10px; font-size: 14px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 7px; outline: none;
+  }
+  select:focus, input:focus { border-color: var(--accent); }
+  .checks { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; }
+  .checks label, .radio-row label {
+    display: flex; align-items: center; gap: 7px; font-size: 14px;
+    padding: 5px 8px; border: 1px solid var(--border); border-radius: 7px;
+    background: var(--bg); cursor: pointer; margin: 0;
+  }
+  .checks label:hover, .radio-row label:hover { border-color: var(--accent); }
+  .radio-row { display: flex; gap: 8px; }
+  .radio-row label { flex: 1; justify-content: center; }
+  .checks input, .radio-row input { accent-color: var(--accent); }
+  .btn {
+    padding: 10px 18px; font-size: 14.5px; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+  }
+  .btn:hover { background: var(--accent-hi); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn.ghost { background: var(--panel2); border: 1px solid var(--border); color: var(--text); }
+  .btn.ghost:hover { border-color: var(--accent); }
+  .btn.danger { background: rgba(248,81,73,.15); color: var(--danger);
+                border: 1px solid rgba(248,81,73,.5); }
+  .btn.sm { padding: 6px 12px; font-size: 13px; }
+  .bar-wrap { background: var(--panel2); border: 1px solid var(--border);
+              border-radius: 8px; height: 22px; overflow: hidden; }
+  .bar { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), #7aa7ff);
+         transition: width .4s; display: flex; align-items: center; justify-content: center;
+         font-size: 11.5px; color: #fff; white-space: nowrap; }
+  .metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 14px 0; }
+  @media (max-width: 1100px) { .metrics { grid-template-columns: repeat(2, 1fr); } }
+  .metric { background: var(--panel); border: 1px solid var(--border);
+            border-radius: 10px; padding: 12px 14px; }
+  .metric .k { font-size: 12px; color: var(--muted); }
+  .metric .v { font-size: 22px; font-weight: 650; margin-top: 2px; }
+  .tablewrap { overflow: auto; max-height: 440px; border: 1px solid var(--border);
+               border-radius: 8px; background: var(--panel); }
+  table { border-collapse: collapse; font-size: 13px; width: max-content; min-width: 100%; }
+  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border);
+           white-space: nowrap; max-width: 340px; overflow: hidden; text-overflow: ellipsis; }
+  th { position: sticky; top: 0; background: var(--panel2); z-index: 1;
+       color: var(--muted); font-weight: 600; font-size: 12px; }
+  tr:hover td { background: rgba(76,141,255,.06); }
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 20px;
+           font-size: 12px; font-weight: 600; }
+  .badge.done { background: rgba(63,185,80,.15); color: var(--ok); }
+  .badge.running, .badge.queued { background: rgba(76,141,255,.15); color: var(--accent-hi); }
+  .badge.error { background: rgba(248,81,73,.15); color: var(--danger); }
+  .badge.stopped { background: rgba(210,153,34,.15); color: var(--warn); }
+  /* sidebar history list */
+  .side-hist { display: flex; flex-direction: column; gap: 6px; max-height: 330px;
+               overflow: auto; }
+  .side-run {
+    display: block; width: 100%; text-align: left; padding: 7px 9px;
+    font-size: 12.5px; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 7px; cursor: pointer;
+  }
+  .side-run:hover { border-color: var(--accent); background: rgba(76,141,255,.07); }
+  .side-run .name { display: block; overflow: hidden; text-overflow: ellipsis;
+                    white-space: nowrap; font-weight: 600; }
+  .side-run .meta { display: flex; align-items: center; gap: 7px; margin-top: 4px;
+                    color: var(--muted); font-size: 11.5px; }
+  .side-run .badge { font-size: 10.5px; padding: 1px 7px; }
+  .side-hist .all {
+    font-size: 12.5px; color: var(--accent); background: none; border: 0;
+    padding: 3px 2px; cursor: pointer; text-align: left;
+  }
+  .side-hist .all:hover { text-decoration: underline; }
+  /* sidebar: resized by dragging the divider on its right edge */
+  .resizer { width: 6px; flex-shrink: 0; cursor: col-resize; background: transparent;
+             transition: background .12s; }
+  .resizer:hover { background: rgba(76,141,255,.55); }
+  body.resizing { cursor: col-resize; }
+  body.resizing, body.resizing * { user-select: none; }
+  body.resizing .resizer { background: var(--accent); }
+  /* the sidebar still scrolls, but no scrollbar is drawn */
+  .sidebar, .side-hist { scrollbar-width: none; -ms-overflow-style: none; }
+  .sidebar::-webkit-scrollbar, .side-hist::-webkit-scrollbar { width: 0; height: 0; display: none; }
+  .toast {
+    position: fixed; bottom: 22px; right: 22px; z-index: 50;
+    background: var(--panel2); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent); color: var(--text);
+    padding: 11px 16px; border-radius: 8px; max-width: 420px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.4); display: none; font-size: 13.5px;
+  }
+  .toast.err { border-left-color: var(--danger); }
+  details { background: var(--panel); border: 1px solid var(--border);
+            border-radius: 8px; padding: 10px 14px; margin-top: 12px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13.5px; }
+  pre { margin: 10px 0 0; font-size: 12.5px; overflow: auto; color: var(--muted); }
+  .hidden { display: none !important; }
+  .row-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="title">🗺️ Google Maps Batch Search</div>
+  <div class="spacer"></div>
+  <span class="user" id="who"></span>
+  <button class="btn ghost sm" id="logout">Log out</button>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <button class="navbtn active" data-view="run">▶ New run</button>
+    <button class="navbtn" data-view="history">🕘 History</button>
+
+    <div class="card">
+      <h3>History</h3>
+      <div class="side-hist" id="side-history">
+        <div class="muted">loading…</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Bridge</h3>
+      <div id="bridge-status" class="muted">checking…</div>
+      <label class="f" style="margin-top:10px">Bridge URL</label>
+      <input type="text" id="bridge-url">
+    </div>
+
+    <!-- <div class="card">
+      <h3>Temp files</h3>
+      <div class="muted" id="temp-info">…</div>
+    </div> -->
+  </aside>
+
+  <div class="resizer" id="resizer" title="Drag to resize the sidebar"></div>
+
+  <main>
+    <!-- ============================== RUN VIEW ============================== -->
+    <section id="view-run">
+
+      <!-- step 1: upload -->
+      <div id="step-upload">
+        <h2>Upload <span class="step">· Excel / CSV with a header row and one query per row</span></h2>
+        <div class="drop" id="drop">
+          <div class="big">📄</div>
+          <div><strong>Click to choose</strong> or drag &amp; drop a file here</div>
+          <div class="muted" style="margin-top:6px">.xlsx · .xls · .xlsm · .csv · .tsv</div>
+          <input type="file" id="file" accept=".xlsx,.xls,.xlsm,.csv,.tsv" hidden>
+        </div>
+        <div class="muted" id="upload-status" style="margin-top:10px"></div>
+      </div>
+
+      <!-- step 2: configure -->
+      <div id="step-config" class="hidden">
+        <h2>Configure <span class="step">· sheet, columns, row range, mode</span></h2>
+        <div class="grid2">
+          <div class="card">
+            <h3>Input</h3>
+            <div class="grid2">
+              <div>
+                <label class="f">Sheet</label>
+                <select id="sheet"></select>
+                <div class="muted" id="sheet-meta" style="margin-top:6px"></div>
+              </div>
+              <div>
+                <label class="f">Rows to process</label>
+                <div class="grid2">
+                  <input type="number" id="row-from" min="1" value="1">
+                  <input type="number" id="row-to" min="1" value="1">
+                </div>
+                <div class="muted" id="range-meta" style="margin-top:6px"></div>
+              </div>
+            </div>
+
+            <label class="f" style="margin-top:14px">Query column(s) — tick one or more</label>
+            <div class="muted" style="margin-bottom:7px">
+              Selected values are appended into one query per row
+              (e.g. <em>City</em> + <em>Item</em> → “Paris coffee”).
+            </div>
+            <div class="checks" id="query-cols"></div>
+            <div class="bad-line hidden" id="query-warn" style="margin-top:7px">
+              Tick at least one query column to enable processing.
+            </div>
+
+            <div class="grid2" style="margin-top:14px">
+              <div><label class="f">Location column ('@lat,lng,zoom')</label>
+                <select id="map-ll"></select></div>
+              <div><label class="f">Latitude column</label>
+                <select id="map-lat"></select></div>
+              <div><label class="f">Longitude column</label>
+                <select id="map-lng"></select></div>
+              <div><label class="f">Zoom column</label>
+                <select id="map-zoom"></select></div>
+              <div><label class="f">Pagination start column</label>
+                <select id="map-start"></select></div>
+              <div>
+                <label class="f">Response mode</label>
+                <div class="radio-row">
+                  <label><input type="radio" name="shape" value="full" checked> full</label>
+                  <label><input type="radio" name="shape" value="slim"> slim</label>
+                </div>
+              </div>
+            </div>
+
+            <details style="margin-top:12px">
+              <summary>Advanced</summary>
+              <div class="grid2" style="margin-top:10px">
+                <div><label class="f">Rows per bulk call</label>
+                  <input type="number" id="adv-batch" min="1" max="100"></div>
+                <div><label class="f">Parallel searches per call</label>
+                  <input type="number" id="adv-conc" min="1" max="16"></div>
+              </div>
+            </details>
+
+            <div class="row-actions">
+              <button class="btn" id="start">▶ Start processing</button>
+              <button class="btn ghost" id="config-cancel">Choose another file</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Sheet preview <span id="preview-sheet" class="muted"></span></h3>
+            <div class="tablewrap" id="preview-table"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- step 3: progress -->
+      <div id="step-progress" class="hidden">
+        <h2>Processing <span class="step" id="progress-name"></span></h2>
+        <div class="bar-wrap"><div class="bar" id="bar">0%</div></div>
+        <div class="muted" id="progress-meta" style="margin-top:8px"></div>
+        <div class="row-actions">
+          <button class="btn danger" id="stop">■ Stop</button>
+          <span class="muted" id="stop-note"></span>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <h3>Live rows <span class="muted">(all fields)</span></h3>
+          <div class="tablewrap" id="live-table"></div>
+        </div>
+      </div>
+
+      <!-- step 4: result -->
+      <div id="step-result" class="hidden">
+        <h2>Result <span class="step" id="result-name"></span></h2>
+        <div id="result-error" class="bad-line hidden" style="margin-bottom:10px"></div>
+        <div class="metrics" id="metrics"></div>
+        <div class="row-actions" style="margin-top:0">
+          <button class="btn" id="download">⬇️ Download processed file</button>
+          <button class="btn ghost" id="rerun">↻ Process another range</button>
+          <button class="btn ghost" id="another">New run</button>
+          <span class="muted" id="file-note"></span>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <h3>Output — all fields as stored in the file</h3>
+          <div class="muted" id="output-meta" style="margin-bottom:8px"></div>
+          <div class="tablewrap" id="output-table"></div>
+        </div>
+        <details id="summary-box">
+          <summary>Processing summary (JSON)</summary>
+          <pre id="summary-json"></pre>
+        </details>
+      </div>
+    </section>
+
+    <!-- ============================ HISTORY VIEW ============================ -->
+    <section id="view-history" class="hidden">
+      <h2>History <span class="step">· your runs on this server</span></h2>
+      <div class="tablewrap" id="history-table"></div>
+      <div class="muted" id="history-empty" class="hidden" style="margin-top:12px"></div>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+"use strict";
+
+/* ------------------------------ helpers ------------------------------ */
+const $ = (sel) => document.querySelector(sel);
+const state = { upload: null, lastConfig: null, jobId: null, timer: null, view: "run" };
+
+function toast(msg, isErr = false, ms = 4200) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = "toast" + (isErr ? " err" : "");
+  t.style.display = "block";
+  clearTimeout(t._h);
+  t._h = setTimeout(() => { t.style.display = "none"; }, ms);
+}
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v;
+    else if (k === "text") node.textContent = v;
+    else node.setAttribute(k, v);
+  }
+  for (const child of children.flat()) {
+    if (child == null) continue;
+    node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+  }
+  return node;
+}
+
+function errMsg(data, fallback) {
+  return data?.error?.message || data?.detail || data?.message || fallback;
+}
+
+async function apiRaw(path, opts = {}) {
+  const token = localStorage.getItem("ui_token");
+  const headers = Object.assign({}, opts.headers || {});
+  if (token) headers["Authorization"] = "Bearer " + token;
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (res.status === 401) {
+    localStorage.removeItem("ui_token");
+    location.replace("/login");
+    throw new Error("Not authenticated");
+  }
+  return res;
+}
+
+async function api(path, opts = {}) {
+  const res = await apiRaw(path, opts);
+  let data = null;
+  try { data = await res.json(); } catch (_) { /* non-JSON */ }
+  if (!res.ok) throw new Error(errMsg(data, `Request failed (${res.status})`));
+  return data;
+}
+
+function unionKeys(records) {
+  const cols = [];
+  const seen = new Set();
+  for (const rec of records || []) {
+    for (const k of Object.keys(rec)) {
+      if (!seen.has(k)) { seen.add(k); cols.push(k); }
+    }
+  }
+  return cols;
+}
+
+/* XSS-safe table from records (values rendered as text). */
+function renderTable(container, records, columns, cap = 500) {
+  container.textContent = "";
+  if (!records || !records.length) {
+    container.appendChild(el("div", { class: "muted", text: "No rows." , style: "padding:12px"}));
+    return;
+  }
+  const cols = columns || unionKeysWithFallback(records);
+  const table = el("table");
+  table.appendChild(el("thead", {}, el("tr", {}, ...cols.map((c) => el("th", { text: String(c) })))));
+  const tbody = el("tbody");
+  for (const rec of records.slice(0, cap)) {
+    tbody.appendChild(el("tr", {}, ...cols.map((c) =>
+      el("td", { text: rec[c] == null ? "" : String(rec[c]),
+                 title: rec[c] == null ? "" : String(rec[c]) }))));
+  }
+  table.appendChild(tbody);
+  container.appendChild(table);
+  if (records.length > cap) {
+    container.appendChild(el("div", { class: "muted",
+      text: `Showing first ${cap} of ${records.length} rows — download the file for everything.`,
+      style: "padding:8px 10px" }));
+  }
+}
+
+function unionKeysWithFallback(records) {
+  const keys = unionKeys(records);
+  return keys.length ? keys : Object.keys((records || [{}])[0] || {});
+}
+
+/* ---------------------------- view switching ---------------------------- */
+function setView(name) {
+  state.view = name;
+  $("#view-run").classList.toggle("hidden", name !== "run");
+  $("#view-history").classList.toggle("hidden", name !== "history");
+  document.querySelectorAll(".navbtn").forEach((b) =>
+    b.classList.toggle("active", b.dataset.view === name));
+  if (name === "history") loadHistory();
+}
+
+function showStep(name) {
+  for (const s of ["upload", "config", "progress", "result"]) {
+    $("#step-" + s).classList.toggle("hidden", s !== name);
+  }
+}
+
+/* Back to the upload step ("New run"). Also detaches the page from a job it
+   was watching - the run itself keeps going on the server (see History). */
+function goUpload() {
+  clearInterval(state.timer);
+  state.timer = null;
+  state.upload = null;
+  state.jobId = null;
+  state.lastConfig = null;
+  fileInput.value = "";
+  const status = $("#upload-status");
+  if (status) status.textContent = "";
+  showStep("upload");
+}
+
+document.querySelectorAll(".navbtn").forEach((b) =>
+  b.addEventListener("click", () => {
+    setView(b.dataset.view);
+    if (b.dataset.view === "run") goUpload();   // "New run" always shows the upload page
+  }));
+
+$("#logout").addEventListener("click", () => {
+  localStorage.removeItem("ui_token");
+  localStorage.removeItem("ui_username");
+  location.href = "/login";
+});
+
+/* ------------------------------ sidebar ------------------------------ */
+async function loadSidebar() {
+  const tempEl = $("#temp-info");   // optional: the card may be commented out
+  try {
+    const cfg = await api("/ui/api/config");
+    if (!$("#bridge-url").value) $("#bridge-url").value = cfg.bridge_url;
+    $("#adv-batch").value = cfg.batch_size;
+    $("#adv-conc").value = cfg.concurrency;
+    if (tempEl) tempEl.textContent =
+      `Stored in ${cfg.temp_dir}, erased after ${cfg.ttl_minutes} min ` +
+      `(TEMP_FILE_TTL_MINUTES, sweep every ${cfg.cleanup_interval}s).`;
+    if (cfg.shape === "slim") document.querySelector('input[name=shape][value=slim]').checked = true;
+  } catch (e) { if (tempEl) tempEl.textContent = e.message; }
+
+  try {
+    const h = await fetch("/health").then((r) => r.json());
+    const rl = h.rate_limit_per_key_per_minute;
+    $("#bridge-status").innerHTML = "";
+    $("#bridge-status").append(
+      el("span", { class: "ok-line", text: `connected · ${h.api_keys_loaded} key(s)` }),
+      el("div", { class: "muted", text:
+        `rate limit: ${rl ? rl + " calls/min per key" : "unlimited"}` +
+        ` · window ${h.rate_limit_window_seconds}s · max batch ${h.max_batch_size}` }));
+  } catch (e) {
+    $("#bridge-status").textContent = "Bridge unreachable: " + e.message;
+  }
+}
+
+/* ------------------------- resizable sidebar (drag divider) ------------------------- */
+(() => {
+  const sidebar = document.querySelector(".sidebar");
+  const resizer = $("#resizer");
+  if (!sidebar || !resizer) return;
+  const MIN = 190, MAX = 560, KEY = "ui_sidebar_w";
+  let width = parseInt(localStorage.getItem(KEY) || "", 10) || 265;
+
+  const stacked = () => window.innerWidth <= 1100;   // column layout -> CSS owns width
+  const apply = () => {
+    sidebar.style.width = stacked() ? "" : Math.min(MAX, Math.max(MIN, width)) + "px";
+  };
+  apply();
+  window.addEventListener("resize", apply);
+
+  let dragging = false;
+  resizer.addEventListener("mousedown", (e) => {
+    if (stacked()) return;
+    dragging = true;
+    e.preventDefault();
+    document.body.classList.add("resizing");
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    width = Math.min(MAX, Math.max(MIN, e.clientX - sidebar.getBoundingClientRect().left));
+    sidebar.style.width = width + "px";
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove("resizing");
+    localStorage.setItem(KEY, String(Math.round(width)));
+  });
+})();
+
+/* ------------------------------ upload ------------------------------ */
+const drop = $("#drop");
+const fileInput = $("#file");
+drop.addEventListener("click", () => fileInput.click());
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => {
+  e.preventDefault(); drop.classList.remove("over");
+  if (e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener("change", () => {
+  if (fileInput.files[0]) uploadFile(fileInput.files[0]);
+});
+
+async function uploadFile(file) {
+  $("#upload-status").textContent = `Uploading ${file.name}…`;
+  try {
+    const res = await apiRaw(
+      "/ui/api/uploads?filename=" + encodeURIComponent(file.name),
+      { method: "POST", headers: { "Content-Type": "application/octet-stream" },
+        body: file });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(errMsg(data, `Upload failed (${res.status})`));
+    $("#upload-status").textContent = "";
+    state.upload = data;
+    renderConfig(data, null);
+  } catch (e) {
+    $("#upload-status").textContent = "";
+    toast(e.message, true, 6000);
+  }
+}
+
+/* ------------------------------ configure ------------------------------ */
+function detectedQuery(info, sheet) {
+  const d = info.sheet_detected[sheet];
+  const q = d && d.query;
+  return Array.isArray(q) ? q : (q ? [q] : []);
+}
+
+function fillSelect(sel, columns, selected) {
+  sel.textContent = "";
+  sel.appendChild(el("option", { value: "", text: "(none)" }));
+  for (const c of columns) {
+    const opt = el("option", { value: c, text: String(c) });
+    if (String(c) === String(selected || "")) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+function renderConfig(info, preset) {
+  showStep("config");
+  const sheets = info.sheets;
+  const sheetSel = $("#sheet");
+  sheetSel.textContent = "";
+  const wantedSheet = (preset && preset.sheet) || info.sheet;
+  for (const s of sheets) {
+    const opt = el("option", { value: s, text: String(s) });
+    if (s === wantedSheet) opt.selected = true;
+    sheetSel.appendChild(opt);
+  }
+  sheetSel.onchange = () => renderSheet(info, preset, sheetSel.value);
+  renderSheet(info, preset, sheetSel.value);
+}
+
+function renderSheet(info, preset, sheet) {
+  const columns = info.sheet_columns[sheet] || [];
+  const rows = info.sheet_rows[sheet] || 0;
+  const detected = info.sheet_detected[sheet] || {};
+
+  $("#sheet-meta").textContent = `${rows} data row(s) · ${columns.length} column(s)`;
+
+  // query checkboxes
+  const defaults = new Set((preset && preset.query_columns) || detectedQuery(info, sheet));
+  const box = $("#query-cols");
+  box.textContent = "";
+  for (const c of columns) {
+    const id = "qc_" + String(c).replace(/[^A-Za-z0-9_]/g, "_");
+    const input = el("input", { type: "checkbox", id });
+    input.checked = defaults.has(c);
+    input.addEventListener("change", updateQueryWarn);
+    box.appendChild(el("label", { for: id }, input, String(c)));
+  }
+  updateQueryWarn();
+
+  // other mapping selects (detected by default, preset overrides)
+  const p = preset || {};
+  fillSelect($("#map-ll"), columns, p.ll !== undefined ? p.ll : detected.ll);
+  fillSelect($("#map-lat"), columns, p.lat !== undefined ? p.lat : detected.lat);
+  fillSelect($("#map-lng"), columns, p.lng !== undefined ? p.lng : detected.lng);
+  fillSelect($("#map-zoom"), columns, p.zoom !== undefined ? p.zoom : detected.zoom);
+  fillSelect($("#map-start"), columns, p.start !== undefined ? p.start : detected.start);
+
+  // row range
+  const from = $("#row-from"), to = $("#row-to");
+  from.max = to.max = Math.max(rows, 1);
+  from.value = (p.start_row && p.start_row <= rows) ? p.start_row : 1;
+  to.value = (p.end_row && p.end_row <= rows) ? p.end_row : Math.max(rows, 1);
+  const updateRange = () => {
+    const a = Math.max(1, parseInt(from.value || "1", 10));
+    const b = Math.min(Math.max(rows, 1), parseInt(to.value || String(rows), 10));
+    $("#range-meta").textContent = (b >= a)
+      ? `Processing ${b - a + 1} of ${rows} rows (rows outside the range stay untouched)`
+      : "`From row` must be ≤ `To row`";
+  };
+  from.onchange = updateRange; to.onchange = updateRange; updateRange();
+
+  // mode + advanced
+  const shape = p.shape || "full";
+  document.querySelector(`input[name=shape][value=${shape}]`).checked = true;
+  if (p.batch_size) $("#adv-batch").value = p.batch_size;
+  if (p.concurrency) $("#adv-conc").value = p.concurrency;
+
+  // preview table
+  $("#preview-sheet").textContent = `· ${sheet} (first 20 rows)`;
+  renderTable($("#preview-table"), info.previews[sheet] || []);
+}
+
+function queryColumns() {
+  return Array.from($("#query-cols").querySelectorAll("input:checked"))
+    .map((i) => i.parentElement.textContent);
+}
+
+function updateQueryWarn() {
+  const none = queryColumns().length === 0;
+  $("#query-warn").classList.toggle("hidden", !none);
+  $("#start").disabled = none;
+}
+
+$("#config-cancel").addEventListener("click", goUpload);
+
+$("#start").addEventListener("click", async () => {
+  if (!state.upload) return;
+  const body = {
+    upload_id: state.upload.upload_id,
+    sheet: $("#sheet").value,
+    query_columns: queryColumns(),
+    ll: $("#map-ll").value || null,
+    lat: $("#map-lat").value || null,
+    lng: $("#map-lng").value || null,
+    zoom: $("#map-zoom").value || null,
+    start: $("#map-start").value || null,
+    start_row: parseInt($("#row-from").value || "1", 10),
+    end_row: parseInt($("#row-to").value || "1", 10),
+    shape: document.querySelector("input[name=shape]:checked").value,
+    batch_size: parseInt($("#adv-batch").value || "50", 10),
+    concurrency: parseInt($("#adv-conc").value || "8", 10),
+    bridge_url: $("#bridge-url").value.trim() || null,
+  };
+  state.lastConfig = body;
+  $("#start").disabled = true;
+  try {
+    const data = await api("/ui/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    openJob(data.job_id, true);
+    loadHistory();   // make the new run show up in the sidebar list right away
+  } catch (e) {
+    toast(e.message, true, 6000);
+    $("#start").disabled = false;
+  }
+});
+
+/* ------------------------------ progress ------------------------------ */
+function openJob(jobId, fresh = false) {
+  state.jobId = jobId;
+  clearInterval(state.timer);
+  state.timer = null;
+  if (fresh) showStep("progress");
+  pollOnce().then((job) => {
+    // Ignore a late response for a run the user has already navigated away from.
+    if (!job || job.id !== state.jobId) return;
+    if (["queued", "running"].includes(job.status)) {
+      showStep("progress");
+      state.timer = setInterval(pollOnce, 1000);
+    } else if (["done", "stopped", "error"].includes(job.status)) {
+      showStep("result"); renderResult(job);
+    }
+  });
+}
+
+async function pollOnce() {
+  const jobId = state.jobId;
+  if (!jobId) return null;
+  try {
+    const job = await api("/ui/api/jobs/" + jobId);
+    if (job.id !== state.jobId) return null;   // stale response - another run is open now
+    if (["queued", "running"].includes(job.status)) renderProgress(job);
+    else {
+      clearInterval(state.timer); state.timer = null;
+      // A watched run just finished - move from the progress panel to the result.
+      showStep("result");
+      renderResult(job);
+      loadHistory();
+    }
+    return job;
+  } catch (e) {
+    if (jobId === state.jobId) {
+      clearInterval(state.timer); state.timer = null;
+      toast(e.message, true);
+    }
+    return null;
+  }
+}
+
+function renderProgress(job) {
+  $("#progress-name").textContent = `· ${job.original_name}`;
+  refreshSideJob(job);
+  const p = job.progress || {};
+  const total = p.total || 0, done = p.done || 0;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  const bar = $("#bar");
+  bar.style.width = pct + "%";
+  bar.textContent = `${pct}%  ·  ${done}/${total} rows · ok=${p.succeeded || 0} failed=${p.failed || 0}`;
+  $("#progress-meta").textContent =
+    `${p.message || job.status} · elapsed ${(p.elapsed || 0).toFixed(1)}s` +
+    (job.status === "queued" ? " · waiting for a worker…" : "");
+  renderTable($("#live-table"), (p.preview || []).slice().reverse());
+  $("#stop").disabled = job.status === "queued" ? false : false;
+}
+
+$("#stop").addEventListener("click", async () => {
+  if (!state.jobId) return;
+  try {
+    const data = await api(`/ui/api/jobs/${state.jobId}/stop`, { method: "POST" });
+    $("#stop-note").textContent = data.message || "Stop requested…";
+  } catch (e) { toast(e.message, true); }
+});
+
+/* ------------------------------ result ------------------------------ */
+function renderResult(job) {
+  $("#result-name").textContent = `· ${job.original_name}`;
+  const errBox = $("#result-error");
+  if (job.status === "error") {
+    errBox.textContent = "Processing failed: " + (job.error || "unknown error");
+    errBox.classList.remove("hidden");
+  } else if (job.status === "stopped") {
+    errBox.textContent = "Stopped early — rows after the stop point are marked not_processed.";
+    errBox.classList.remove("hidden");
+  } else {
+    errBox.classList.add("hidden");
+  }
+
+  const s = job.summary || {};
+  const metrics = [
+    ["Processed", `${s.rows_processed ?? "–"}/${s.rows_in_range ?? "–"}`],
+    ["Succeeded", s.rows_succeeded ?? "–"],
+    ["Failed", s.rows_failed ?? "–"],
+    ["Out of range", s.rows_out_of_range ?? "–"],
+    ["Time", (s.elapsed_seconds != null ? s.elapsed_seconds + "s" : "–")],
+  ];
+  const m = $("#metrics"); m.textContent = "";
+  for (const [k, v] of metrics) {
+    m.appendChild(el("div", { class: "metric" },
+      el("div", { class: "k", text: k }), el("div", { class: "v", text: String(v) })));
+  }
+
+  const hasOutput = job.output && !job.output.error;
+  $("#download").disabled = !hasOutput;
+  $("#rerun").disabled = !state.upload && !job.id;
+  $("#file-note").textContent = hasOutput
+    ? "Server copy is auto-deleted after the TTL (see sidebar)."
+    : (job.output?.error || "Output file unavailable (expired?).");
+  $("#file-note").className = hasOutput ? "muted" : "bad-line";
+
+  if (hasOutput) {
+    $("#output-meta").textContent =
+      `Sheet ${job.output.sheet} · ${job.output.total_rows} row(s) × ` +
+      `${job.output.columns.length} column(s)` +
+      (job.output.truncated ? " — preview capped at 500 rows" : "") +
+      " — identical to the downloaded file.";
+    renderTable($("#output-table"), job.output.rows, job.output.columns, 500);
+  } else {
+    $("#output-meta").textContent = job.output?.error || "No output to show.";
+    $("#output-table").textContent = "";
+  }
+
+  $("#summary-json").textContent = JSON.stringify(job.summary || {}, null, 2);
+}
+
+$("#download").addEventListener("click", async () => {
+  if (!state.jobId) return;
+  try {
+    const res = await apiRaw(`/ui/api/jobs/${state.jobId}/download`);
+    if (!res.ok) throw new Error(errMsg(await res.json().catch(() => null), "Download failed"));
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = cd.match(/filename="?([^";]+)"?/);
+    const name = m ? m[1] : "processed.xlsx";
+    const url = URL.createObjectURL(blob);
+    const a = el("a", { href: url, download: name });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) { toast(e.message, true); }
+});
+
+$("#another").addEventListener("click", goUpload);
+
+$("#rerun").addEventListener("click", async () => {
+  // Clone the input file into a fresh draft so a new range can be processed.
+  const sourceId = state.jobId;
+  if (!sourceId) return;
+  try {
+    const data = await api(`/ui/api/jobs/${sourceId}/duplicate`, { method: "POST" });
+    state.upload = data;
+    renderConfig(data, state.lastConfig);
+    setView("run");
+  } catch (e) { toast(e.message, true, 6000); }
+});
+
+/* ------------------------------ history ------------------------------ */
+/* Sidebar run list - rendered from the same /ui/api/history payload. */
+function renderSideHistory(items) {
+  const box = $("#side-history");
+  box.textContent = "";
+  if (!items.length) {
+    box.appendChild(el("div", { class: "muted", text: "No runs yet." }));
+    return;
+  }
+  const recent = items.slice(0, 8);
+  for (const item of recent) {
+    const when = (item.started_at || item.created_at || "").replace("T", " ").slice(5, 16);
+    const btn = el("button", { class: "side-run", "data-job": item.id,
+                               title: `${item.original_name} · ${item.status}` },
+      el("span", { class: "name", text: item.original_name }),
+      el("span", { class: "meta" },
+        el("span", { class: "badge " + item.status, text: item.status }),
+        el("span", { class: "when", text: when }),
+        el("span", { class: "count",
+                     text: item.rows_succeeded == null ? "" : `${item.rows_succeeded} ok` })));
+    btn.addEventListener("click", () => openJobFromHistory(item));
+    box.appendChild(btn);
+  }
+  if (items.length > recent.length) {
+    const all = el("button", { class: "all", text: `View all ${items.length} runs →` });
+    all.addEventListener("click", () => setView("history"));
+    box.appendChild(all);
+  }
+}
+
+/* Live status/count update for the entry of the job currently being watched. */
+function refreshSideJob(job) {
+  const btn = document.querySelector(`#side-history .side-run[data-job="${job.id}"]`);
+  if (!btn) return;
+  const badge = btn.querySelector(".badge");
+  badge.className = "badge " + job.status;
+  badge.textContent = job.status;
+  const p = job.progress || {};
+  const count = btn.querySelector(".count");
+  if (count && p.total) count.textContent = `${p.succeeded || 0}/${p.total} ok`;
+}
+
+async function loadHistory() {
+  const box = $("#history-table");
+  try {
+    const data = await api("/ui/api/history");
+    const items = data.items || [];
+    renderSideHistory(items);
+    if (!items.length) {
+      box.textContent = "";
+      box.appendChild(el("div", { class: "muted",
+        text: "No runs yet — start one from “New run”.", style: "padding:14px" }));
+      return;
+    }
+    const cols = ["When", "File", "Status", "Rows ok", "Failed", "Mode", "Range", ""];
+    const table = el("table");
+    table.appendChild(el("thead", {}, el("tr", {}, ...cols.map((c) => el("th", { text: c })))));
+    const tbody = el("tbody");
+    for (const item of items) {
+      const when = (item.started_at || item.created_at || "").replace("T", " ").slice(0, 19);
+      const open = el("button", { class: "btn ghost sm", text: "View" });
+      open.addEventListener("click", () => openJobFromHistory(item));
+      tbody.appendChild(el("tr", {},
+        el("td", { text: when }),
+        el("td", { text: item.original_name, title: item.original_name }),
+        el("td", {}, el("span", { class: "badge " + item.status, text: item.status })),
+        el("td", { text: item.rows_succeeded == null ? "–" : String(item.rows_succeeded) }),
+        el("td", { text: item.rows_failed == null ? "–" : String(item.rows_failed) }),
+        el("td", { text: item.shape || "–" }),
+        el("td", { text: item.range && item.range[0] ? `${item.range[0]}–${item.range[1]}` : "–" }),
+        el("td", {}, open)));
+    }
+    table.appendChild(tbody);
+    box.textContent = ""; box.appendChild(table);
+  } catch (e) {
+    box.textContent = "";
+    box.appendChild(el("div", { class: "bad-line", text: e.message, style: "padding:14px" }));
+    const side = $("#side-history");
+    side.textContent = "";
+    side.appendChild(el("div", { class: "bad-line", text: e.message }));
+  }
+}
+
+function openJobFromHistory(item) {
+  setView("run");
+  openJob(item.id);
+}
+
+/* ------------------------------ boot ------------------------------ */
+async function boot() {
+  if (!localStorage.getItem("ui_token")) { location.replace("/login"); return; }
+  try {
+    const me = await api("/ui/api/me");
+    $("#who").textContent = me.username;
+    localStorage.setItem("ui_username", me.username);
+  } catch (_) { return; }  // redirected by api()
+
+  // Sidebar/history are cosmetic - never let one failure abort the whole boot.
+  try { await loadSidebar(); } catch (_) { /* inline error already rendered */ }
+  try { await loadHistory(); } catch (_) { /* inline error already rendered */ }
+
+  // Re-attach to a run that is still going (e.g. the page was closed).
+  try {
+    const data = await api("/ui/api/history");
+    const active = (data.items || []).find((i) => ["queued", "running"].includes(i.status));
+    if (active) {
+      toast(`Re-attached to running job: ${active.original_name}`, false, 5000);
+      openJob(active.id);
+      return;
+    }
+  } catch (_) { /* ignore */ }
+  showStep("upload");
+}
+
+boot();
+})();
+</script>
+</body>
+</html>

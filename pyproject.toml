@@ -1,7 +1,7 @@
 [project]
 name = "composio-rest-bridge"
-version = "1.1.0"
-description = "Single-file FastAPI bridge that exposes Composio tools (Google Maps Search) as plain REST, with round-robin API key rotation."
+version = "1.2.0"
+description = "Single-file FastAPI bridge that exposes Composio tools (Google Maps Search) as plain REST, with round-robin API key rotation and a built-in batch UI."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -9,7 +9,7 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "httpx>=0.27",
     "python-dotenv>=1.0",
-    # batch file processing (maps-batch CLI + Streamlit UI)
+    # batch file processing (maps-batch CLI + built-in /ui page)
     "pandas>=2.2",
     "openpyxl>=3.1",
     "xlrd>=2.0",
@@ -19,10 +19,6 @@ dependencies = [
 # Needed only for the in-process tests (fastapi.testclient).
 dev = [
     "pytest>=8.0",
-]
-# Streamlit UI (uv sync --extra ui).
-ui = [
-    "streamlit>=1.40",
 ]
 
 [project.scripts]
@@ -34,12 +30,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["composio_bridge.py", "batch_processor.py", "streamlit_app.py"]
+only-include = ["composio_bridge.py", "batch_processor.py", "ui_api.py"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "composio_bridge.py" = "composio_bridge.py"
 "batch_processor.py" = "batch_processor.py"
-"streamlit_app.py" = "streamlit_app.py"
+"ui_api.py" = "ui_api.py"
+"ui/login.html" = "ui/login.html"
+"ui/app.html" = "ui/app.html"
 
 [tool.uv]
 # Project is a single module, not a package: installing it as editable is fine.

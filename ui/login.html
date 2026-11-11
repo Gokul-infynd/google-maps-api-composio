@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login · Google Maps Batch Search</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #4c8dff; --accent-hi: #6ca0ff;
+    --danger: #f85149; --ok: #3fb950;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(1200px 600px at 20% -10%, #1a2433 0%, var(--bg) 55%);
+    color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .card {
+    width: 360px; max-width: calc(100vw - 32px);
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 32px 28px;
+    box-shadow: 0 16px 48px rgba(0,0,0,.45);
+  }
+  .brand { font-size: 30px; text-align: center; }
+  h1 { font-size: 19px; margin: 6px 0 2px; text-align: center; font-weight: 650; }
+  .sub { color: var(--muted); font-size: 13px; text-align: center; margin-bottom: 22px; }
+  label { display: block; font-size: 12.5px; color: var(--muted); margin: 14px 0 5px; }
+  input {
+    width: 100%; padding: 10px 12px; font-size: 14.5px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; outline: none;
+  }
+  input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(76,141,255,.18); }
+  button {
+    width: 100%; margin-top: 20px; padding: 11px;
+    font-size: 15px; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+  }
+  button:hover { background: var(--accent-hi); }
+  button:disabled { opacity: .6; cursor: default; }
+  .error {
+    display: none; margin-top: 14px; padding: 9px 12px; font-size: 13px;
+    background: rgba(248,81,73,.12); color: var(--danger);
+    border: 1px solid rgba(248,81,73,.4); border-radius: 8px;
+  }
+</style>
+</head>
+<body>
+  <form class="card" id="login-form" autocomplete="on">
+    <div class="brand">🗺️</div>
+    <h1>Google Maps Batch Search</h1>
+    <div class="sub">Sign in to continue</div>
+
+    <label for="username">Username</label>
+    <input id="username" name="username" autocomplete="username" required autofocus>
+
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+
+    <div class="error" id="error"></div>
+    <button type="submit" id="submit">Sign in</button>
+  </form>
+
+<script>
+(() => {
+  const form = document.getElementById("login-form");
+  const errBox = document.getElementById("error");
+  const btn = document.getElementById("submit");
+
+  // Already signed in? go straight to the app.
+  if (localStorage.getItem("ui_token")) { location.replace("/home"); return; }
+
+  function showError(msg) {
+    errBox.textContent = msg;
+    errBox.style.display = "block";
+  }
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    errBox.style.display = "none";
+    btn.disabled = true;
+    btn.textContent = "Signing in…";
+    try {
+      const res = await fetch("/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: document.getElementById("username").value.trim(),
+          password: document.getElementById("password").value,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.token) {
+        throw new Error(data?.error?.message || data?.detail || "Login failed");
+      }
+      localStorage.setItem("ui_token", data.token);
+      localStorage.setItem("ui_username", data.username);
+      location.replace("/home");
+    } catch (e) {
+      showError(e.message || "Login failed");
+      btn.disabled = false;
+      btn.textContent = "Sign in";
+    }
+  });
+})();
+</script>
+</body>
+</html>
