@@ -20,18 +20,15 @@ module.exports = {
       cwd: ROOT,
       interpreter: "none",
 
-      // Load .env so HOST / PORT / COMPOSIO_API_KEY etc. apply.
-      // dotenv is loaded by the app itself too, but this makes PORT visible to PM2.
+      // Only set non-*.env vars here. HOST / PORT / COMPOSIO_API_KEY come from
+      // .env (loaded by the app via load_dotenv). Do NOT hardcode PORT here:
+      // PM2 env vars take precedence over .env, so a literal PORT would
+      // silently override whatever you set in .env.
       env: {
         NODE_ENV: "production",
         PYTHONUNBUFFERED: "1",
-        HOST: "0.0.0.0",
-        PORT: "8000",
       },
-      env_production: {
-        HOST: "0.0.0.0",
-        PORT: "8000",
-      },
+      env_production: {},
 
       // Single worker: the round-robin key pool lives in-process.
       // Running multiple instances would give each its own cursor/stats.
