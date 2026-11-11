@@ -242,7 +242,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Composio REST Bridge",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "Plain REST wrapper around Composio tools. "
         "Focus: **COMPOSIO_SEARCH_GOOGLE_MAPS_SEARCH** (Composio Search -> Google Maps Search). "
@@ -386,6 +386,8 @@ async def execute_tool(slug: str, arguments: dict[str, Any], user_id: Optional[s
                 tried.append(key_index + 1)
                 return await _execute_once(slug, payload, key, key_index, started)
         except KeyRetryable as retry:
+            if not RETRY_ON_KEY_FAILURE:
+                raise retry.http_exc
             last_exc = retry.http_exc
             log.warning("Key #%d unusable (attempt %d/%d) - rotating to next key",
                         tried[-1], attempt + 1, attempts)
@@ -928,12 +930,18 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
     return JSONResponse(error_body(500, "INTERNAL", f"{type(exc).__name__}: {exc}"), status_code=500)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Console entry point: `uv run composio-bridge` (also `python composio_bridge.py`)."""
     import uvicorn
 
-    uvicorn.run(
-        "composio_bridge:app" if os.path.basename(__file__).startswith("composio_bridge") else app,
-        host=os.getenv("HOST", "0.0.0.0"),
-        port=int(os.getenv("PORT", "8000")),
-        reload=bool(os.getenv("RELOAD")),
-    )
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8000"))
+    reload_flag = os.getenv("RELOAD", "").lower() in ("1", "true", "yes")
+    if not KEY_POOL.size:
+        log.warning("No API keys loaded - set COMPOSIO_API_KEY=key1,key2 in .env")
+    # Import string is required for --reload to work.
+    uvicorn.run("composio_bridge:app" if reload_flag else app, host=host, port=port, reload=reload_flag)
+
+
+if __name__ == "__main__":
+    main()

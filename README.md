@@ -5,13 +5,44 @@ Single-file FastAPI service that turns Composio tools into plain REST.
 Primary tool: **Composio Search → Composio Google Maps Search**
 slug `COMPOSIO_SEARCH_GOOGLE_MAPS_SEARCH` (not the Google Maps toolkit — no Google API key needed).
 
-## Setup
+## Setup (uv + PM2)
+
+Requires [uv](https://docs.astral.sh/uv/) and [PM2](https://pm2.keymetrics.io/) (`npm i -g pm2`).
 
 ```bash
-cp .env.example .env      # then set COMPOSIO_API_KEY
-pip install -r requirements.txt
-uvicorn composio_bridge:app --host 0.0.0.0 --port 8000   # or: python composio_bridge.py
+git clone git@github.com:Gokul-infynd/google-maps-api-composio.git
+cd google-maps-api-composio
+cp .env.example .env          # set COMPOSIO_API_KEY=key1,key2,...
+
+./bridge.sh start             # uv sync (if needed) + pm2 start + health check
 ```
+
+### `bridge.sh` commands
+
+| Command | Does |
+|---|---|
+| `./bridge.sh start` | create `.venv` via `uv sync` if missing, start under PM2, wait for health |
+| `./bridge.sh stop` | stop the PM2 app |
+| `./bridge.sh restart` | `uv sync` then restart (use after code or `.env` changes) |
+| `./bridge.sh reload` | zero-downtime reload |
+| `./bridge.sh status` / `logs` / `delete` | PM2 status / tail logs / remove |
+| `./bridge.sh health` | pretty-print `/health` |
+| `./bridge.sh test` | run the offline pytest suite |
+| `./bridge.sh local` | run in the foreground (debugging, no PM2) |
+
+Logs go to `logs/out.log` and `logs/error.log`.
+
+### Raw uv commands
+
+```bash
+uv sync                  # create/refresh .venv from uv.lock
+uv sync --extra dev      # + pytest
+uv run composio-bridge   # console entry point (= python -m composio_bridge)
+uv run pytest            # tests
+```
+
+> **One PM2 instance only.** The round-robin key cursor and per-key stats live
+> in-process, so running `instances: N` would give each worker its own rotation.
 
 ## Multiple API keys (round-robin)
 
